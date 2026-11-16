@@ -1,255 +1,260 @@
-import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
-import { Activity, ArrowDownRight, ArrowUpRight, Check, CircleHelp, FileUp, Plus, Search, ShieldCheck, Trash2, X } from 'lucide-react'
+import { useEffect, useState, type FormEvent } from 'react'
+import { Activity, ArrowDownRight, ArrowUpRight, Check, CircleHelp, Plus, RefreshCw, Search, ShieldCheck, Trash2, X } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { categories, estimateDoubleRate, makeDemoAssets, parsePriceCsv, type Asset, type Category, type Evidence, type PricePoint, type Stance } from './stock'
+import { categories, estimateDoubleRate, type Asset, type Category, type Evidence, type Stance } from './stock'
 import './App.css'
 
-const STORAGE_KEY = 'ai-portfolio-assets-in-v3'
 const filters = ['All assets', ...categories] as const
 type Filter = (typeof filters)[number]
+type Health = { provider: string; providerStatus: string; providerError: string | null; lastAttemptAt: string | null; lastSuccessAt: string | null; schedule: string }
+type SearchResult = { symbol: string; company_name: string; source?: string }
 
-function initialAssets(): Asset[] {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) return JSON.parse(saved) as Asset[]
-  } catch {
-    localStorage.removeItem(STORAGE_KEY)
-  }
-  return makeDemoAssets()
+async function api<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })
+  const result = await response.json()
+  if (!response.ok) throw new Error(result.error || result.message || `Request failed (${response.status})`)
+  return result as T
 }
 
-function money(value: number | undefined, currency: Asset['currency']) {
+function money(value: number | undefined, currency = 'INR') {
   if (value === undefined || !Number.isFinite(value)) return '--'
-  return new Intl.NumberFormat(currency === 'INR' ? 'en-IN' : 'en-US', { style: 'currency', currency, maximumFractionDigits: value < 10 ? 2 : 0 }).format(value)
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: value < 10 ? 2 : 0 }).format(value)
 }
 
-function dateLabel(value: string) {
-  return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(new Date(`${value}T00:00:00`))
+function dateLabel(value?: string) {
+  if (!value) return '--'
+  return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: '2-digit', timeZone: 'Asia/Kolkata' }).format(new Date(`${value.slice(0, 10)}T12:00:00Z`))
 }
 
-function latestPrice(prices: PricePoint[]) {
-  return prices[prices.length - 1]
+function timeLabel(value?: string | null) {
+  if (!value) return 'No quote captured yet'
+  return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(new Date(value))
 }
 
 function App() {
-  const [assets, setAssets] = useState<Asset[]>(initialAssets)
-  const [selectedTicker, setSelectedTicker] = useState('')
+  const [assets, setAssets] = useState<Asset[]>([])
+  const [health, setHealth] = useState<Health>({ provider: '0xramm-yahoo-proxy', providerStatus: 'not-tested', providerError: null, lastAttemptAt: null, lastSuccessAt: null, schedule: 'Weekdays after NSE close' })
   const [filter, setFilter] = useState<Filter>('All assets')
   const [query, setQuery] = useState('')
-  const [showAdd, setShowAdd] = useState(false)
   const [ticker, setTicker] = useState('')
-  const [name, setName] = useState('')
-  const [assetCategory, setAssetCategory] = useState<Category>('Metals')
-  const [currency, setCurrency] = useState<Asset['currency']>('INR')
-  const [formError, setFormError] = useState('')
-  const [showEvidenceForm, setShowEvidenceForm] = useState(false)
+  const [company, setCompany] = useState('')
+  const [assetCategory, setAssetCategory] = useState<Category>('Semiconductor & Electronics')
+  const [showAdd, setShowAdd] = useState(false)
+  const [showEvidence, setShowEvidence] = useState(false)
   const [evidenceSummary, setEvidenceSummary] = useState('')
   const [evidenceSource, setEvidenceSource] = useState('')
   const [evidenceUrl, setEvidenceUrl] = useState('')
   const [stance, setStance] = useState<Stance>('Mixed')
-  const addCsv = useRef<HTMLInputElement>(null)
-  const updateCsv = useRef<HTMLInputElement>(null)
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  const [searchError, setSearchError] = useState('')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  const loadState = async () => {
+    try {
+      const [data, status] = await Promise.all([
+        api<{ assets: Asset[]; providerError: string | null; lastAttemptAt: string | null; lastSuccessAt: string | null }>('/api/state'),
+        api<Health>('/api/health'),
+      ])
+      setAssets(data.assets)
+      setHealth(status)
+      setSelectedTicker((current) => data.assets.some((asset) => asset.ticker === current) ? current : data.assets[0]?.ticker ?? '')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Local monitor API is not running.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(assets))
-    if (!selectedTicker && assets[0]) setSelectedTicker(assets[0].ticker)
-  }, [assets, selectedTicker])
+    void loadState()
+    const timer = window.setInterval(() => { void loadState() }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
 
-  const selected = assets.find((asset) => asset.ticker === selectedTicker) ?? assets[0]
   const visible = assets.filter((asset) => (filter === 'All assets' || asset.category === filter) && `${asset.ticker} ${asset.name}`.toLowerCase().includes(query.toLowerCase()))
-  const demoCount = assets.filter((asset) => asset.source === 'demo').length
-  const rates = assets.map((asset) => estimateDoubleRate(asset.prices)).filter((rate) => rate.probability !== null)
-  const boardRate = rates.length ? rates.reduce((sum, rate) => sum + (rate.probability ?? 0), 0) / rates.length : null
+  const selected = assets.find((asset) => asset.ticker === selectedTicker) ?? assets[0]
+  const last = selected?.prices[selected.prices.length - 1]
+  const plan = selected?.prediction
+  const target = plan?.targetPrice
+  const progress = last && plan ? (last.close / plan.baselinePrice) * 100 : undefined
+  const tracking = selected?.prices.filter((point) => !plan || point.date >= plan.baselineDate).map((point) => ({ ...point, label: dateLabel(point.date) })) ?? []
+  const today = new Date().toISOString().slice(0, 10)
+  const todaySnapshots = assets.filter((asset) => asset.prices.some((point) => point.date === today)).length
+  const targetHits = assets.filter((asset) => asset.prediction?.outcome === 'hit').length
 
-  const updateAsset = (symbol: string, update: (asset: Asset) => Asset) => {
-    setAssets((current) => current.map((asset) => asset.ticker === symbol ? update(asset) : asset))
+  const refreshQuotes = async () => {
+    setBusy(true)
+    setMessage('Requesting quotes from the no-key India market API…')
+    try {
+      const result = await api<{ captured: number; capturedAt: string }>('/api/refresh', { method: 'POST' })
+      await loadState()
+      setMessage(`${result.captured} quote${result.captured === 1 ? '' : 's'} captured at ${timeLabel(result.capturedAt)}.`)
+    } catch (error) {
+      await loadState()
+      setMessage(error instanceof Error ? error.message : 'Quote request failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const searchMarket = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSearchError('')
+    try {
+      const result = await api<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(ticker || company)}`)
+      setSearchResults(result.results || [])
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : 'Search failed. You can still add a known NSE/BSE ticker.')
+      setSearchResults([])
+    }
   }
 
   const addAsset = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const symbol = ticker.trim().toUpperCase()
-    if (!symbol || assets.some((asset) => asset.ticker === symbol)) {
-      setFormError(symbol ? 'That ticker is already on your board.' : 'Enter a ticker symbol.')
-      return
-    }
-    let prices: PricePoint[] = []
-    const file = addCsv.current?.files?.[0]
-    if (file) {
-      try {
-        prices = parsePriceCsv(await file.text())
-      } catch {
-        setFormError('Could not read the CSV. Check the Date and Close columns.')
-        return
-      }
-      if (!prices.length) {
-        setFormError('No valid rows found. Expected Date and Close or Adj Close columns.')
-        return
-      }
-    }
-    const asset: Asset = {
-      ticker: symbol,
-      name: name.trim() || symbol,
-      category: assetCategory,
-      currency,
-      prices,
-      trackingStartDate: latestPrice(prices)?.date,
-      trackingStartPrice: latestPrice(prices)?.close,
-      evidence: [],
-      source: 'import',
-    }
-    setAssets((current) => [...current, asset])
-    setSelectedTicker(symbol)
-    setTicker('')
-    setName('')
-    setFormError('')
-    setShowAdd(false)
-  }
-
-  const importPrices = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file || !selected) return
     try {
-      const points = parsePriceCsv(await file.text())
-      if (!points.length) {
-        window.alert('No valid rows found. The CSV needs Date and Close or Adj Close columns.')
-        return
-      }
-      updateAsset(selected.ticker, (asset) => {
-        const existing = asset.source === 'demo' ? [] : asset.prices
-        const byDate = new Map(existing.map((point) => [point.date, point]))
-        points.forEach((point) => byDate.set(point.date, point))
-        const merged = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date))
-        const baseline = asset.source === 'demo' ? points[points.length - 1] : undefined
-        return {
-          ...asset,
-          prices: merged,
-          source: 'import',
-          trackingStartDate: baseline?.date ?? asset.trackingStartDate,
-          trackingStartPrice: baseline?.close ?? asset.trackingStartPrice,
-        }
-      })
-    } catch {
-      window.alert('Could not read the CSV. Check the Date and Close columns.')
-    } finally {
-      event.target.value = ''
+      await api('/api/watchlist', { method: 'POST', body: JSON.stringify({ ticker, name: company, category: assetCategory }) })
+      setTicker('')
+      setCompany('')
+      setSearchResults([])
+      setShowAdd(false)
+      setMessage('Symbol added. Capture a quote to set its 2× monitoring baseline.')
+      await loadState()
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : 'Could not add that symbol.')
     }
   }
 
-  const addEvidence = (event: FormEvent<HTMLFormElement>) => {
+  const removeAsset = async (symbol: string) => {
+    try {
+      await api(`/api/watchlist/${encodeURIComponent(symbol)}`, { method: 'DELETE' })
+      await loadState()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not remove symbol.')
+    }
+  }
+
+  const saveEvidence = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!selected || !evidenceSummary.trim() || !evidenceSource.trim()) return
-    const item: Evidence = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      date: new Date().toISOString().slice(0, 10),
-      summary: evidenceSummary.trim(),
-      source: evidenceSource.trim(),
-      url: evidenceUrl.trim(),
-      stance,
+    if (!selected) return
+    try {
+      await api('/api/evidence', { method: 'POST', body: JSON.stringify({ ticker: selected.ticker, summary: evidenceSummary, source: evidenceSource, url: evidenceUrl, stance }) })
+      setEvidenceSummary('')
+      setEvidenceSource('')
+      setEvidenceUrl('')
+      setShowEvidence(false)
+      await loadState()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not save evidence.')
     }
-    updateAsset(selected.ticker, (asset) => ({ ...asset, evidence: [item, ...asset.evidence] }))
-    setEvidenceSummary('')
-    setEvidenceSource('')
-    setEvidenceUrl('')
-    setShowEvidenceForm(false)
   }
 
-  const removeAsset = (symbol: string) => {
-    const remaining = assets.filter((asset) => asset.ticker !== symbol)
-    setAssets(remaining)
-    if (selectedTicker === symbol) setSelectedTicker(remaining[0]?.ticker ?? '')
+  const removeEvidence = async (id: string) => {
+    try {
+      await api(`/api/evidence/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      await loadState()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not remove evidence.')
+    }
   }
 
-  const resetDemo = () => {
-    const demo = makeDemoAssets()
-    setAssets(demo)
-    setSelectedTicker(demo[0]?.ticker ?? '')
-    setFilter('All assets')
-    setQuery('')
+  const selectSearchResult = (result: SearchResult) => {
+    setTicker(result.symbol)
+    setCompany(result.company_name)
+    setSearchResults([])
   }
-
-  const last = selected ? latestPrice(selected.prices)?.close : undefined
-  const target = selected?.trackingStartPrice ? selected.trackingStartPrice * 2 : undefined
-  const progress = last && selected?.trackingStartPrice ? (last / selected.trackingStartPrice) * 100 : undefined
-  const rate = selected ? estimateDoubleRate(selected.prices) : { probability: null, windows: 0, hits: 0 }
-  const tracking = selected?.prices.filter((point) => !selected.trackingStartDate || point.date >= selected.trackingStartDate).map((point) => ({ ...point, label: dateLabel(point.date) })) ?? []
-  const evidence = selected?.evidence ?? []
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <a className="brand" href="#top" aria-label="Signal Desk home"><span className="brand-mark"><Activity size={17} /></span><span>SIGNAL<span className="brand-light">DESK</span></span></a>
-        <div className="topbar-meta"><span className="market-status"><i /> INDIA / NSE + BSE</span><button className="icon-button" title="Historical rate method" onClick={() => window.alert('Historical frequency: in rolling windows of 126 trading sessions, count how often a close reached 2x the starting close. Windows overlap and are not independent. This is not a forecast.') }><CircleHelp size={17} /></button></div>
+        <div className="topbar-meta"><span className={`market-status ${health.providerStatus === 'connected' ? 'connected' : 'disconnected'}`}><i /> INDIA / {health.providerStatus === 'connected' ? 'FEED CONNECTED' : 'FEED OFFLINE'}</span><button className="icon-button" title="How monitoring works" onClick={() => window.alert('This records one provider quote per India trading date and stores it locally. The first successful quote sets a 2× target and starts a 63-trading-session monitor. It does not predict which stocks will double.') }><CircleHelp size={17} /></button></div>
       </header>
 
       <main id="top" className="page-content">
         <section className="page-heading">
-          <div><p className="eyebrow">INDIA EQUITY RESEARCH / V1</p><h1>Signal over <span>speculation.</span></h1><p className="heading-copy">Track NSE and BSE metals, AI and semiconductor names against one hard question: how often did a 2x move happen in the historical record?</p></div>
-          <div className="heading-actions"><button className="button button-quiet" onClick={resetDemo}><Activity size={16} /> Load sample</button><button className="button button-primary" onClick={() => { setShowAdd((value) => !value); setFormError('') }}><Plus size={17} /> Add equity</button></div>
+          <div><p className="eyebrow">INDIA AI COMPUTE SUPPLY CHAIN / LIVE QUOTES</p><h1>Evidence over <span>guesswork.</span></h1><p className="heading-copy">Monitor semiconductor, electronics, AI compute, data-center and power-infrastructure suppliers in India.</p></div>
+          <div className="heading-actions"><button className="button button-quiet" onClick={refreshQuotes} disabled={busy || !assets.length}><RefreshCw size={15} className={busy ? 'spin' : ''} /> Refresh quotes</button><button className="button button-primary" onClick={() => { setShowAdd((value) => !value); setSearchError('') }}><Plus size={17} /> Add symbol</button></div>
         </section>
 
-        {demoCount > 0 && <div className="sample-notice" role="status"><span className="sample-dot" /><strong>SIMULATED SAMPLE DATA</strong><span>Prices are fabricated for interface demonstration. Import a price CSV before interpreting any metric.</span></div>}
+        <div className={`connection-banner ${health.providerStatus === 'connected' ? 'is-connected' : 'is-offline'}`} role="status">
+          <span className="connection-light" /><div><strong>{health.providerStatus === 'connected' ? 'Quote feed connected' : 'Quote feed unavailable'}</strong><span>{health.providerError || `Source: ${health.provider} · ${health.schedule}`}</span></div><small>{health.lastSuccessAt ? `Last success ${timeLabel(health.lastSuccessAt)}` : 'No successful quote capture yet'}</small>
+        </div>
+        {message && <div className="action-message" role="status">{message}<button className="icon-button tiny" title="Dismiss" onClick={() => setMessage('')}><X size={14} /></button></div>}
 
-        <section className="method-strip"><div className="method-icon"><ShieldCheck size={18} /></div><div><strong>Historical base rate, not a forward probability.</strong><span>Calculated from your CSV: share of rolling 126-session windows that touched 2x. No live quotes, fundamentals model or investment recommendation.</span></div><span className="method-tag">EVIDENCE FIRST</span></section>
+        <section className="method-strip"><div className="method-icon"><ShieldCheck size={18} /></div><div><strong>Monitoring target, not a model forecast.</strong><span>First successful quote sets the baseline and 2× target. The app records the outcome after 63 captured trading sessions; it does not rank or predict stocks.</span></div><span className="method-tag">DAILY SNAPSHOTS</span></section>
 
         {showAdd && <form className="add-form" onSubmit={addAsset}>
-          <div className="form-heading"><div><span className="eyebrow">WATCHLIST</span><h2>Add an equity</h2></div><button className="icon-button" type="button" title="Close" onClick={() => setShowAdd(false)}><X size={18} /></button></div>
-          <label>Ticker<input required value={ticker} onChange={(event) => setTicker(event.target.value)} placeholder="e.g. TATASTEEL.NS" maxLength={20} /><span className="field-hint">NSE: .NS · BSE: .BO (Yahoo Finance format)</span></label><label>Company<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Company name" /></label>
-          <label>Theme<select value={assetCategory} onChange={(event) => setAssetCategory(event.target.value as Category)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></label><label>Currency<select value={currency} onChange={(event) => setCurrency(event.target.value as Asset['currency'])}><option value="INR">INR</option><option value="USD">USD</option></select></label>
-          <label className="file-field">Optional price CSV<input ref={addCsv} type="file" accept=".csv,text/csv" /></label>{formError && <p className="form-error">{formError}</p>}<button className="button button-primary" type="submit"><Plus size={16} /> Save equity</button>
+          <div className="form-heading"><div><span className="eyebrow">NSE / BSE WATCHLIST</span><h2>Add a symbol to monitor</h2></div><button className="icon-button" type="button" title="Close" onClick={() => setShowAdd(false)}><X size={18} /></button></div>
+          <label>Ticker<input required value={ticker} onChange={(event) => setTicker(event.target.value)} placeholder="KAYNES.NS or NETWEB.NS" maxLength={32} /></label>
+          <label>Company name<input value={company} onChange={(event) => setCompany(event.target.value)} placeholder="Company or supplier name" /></label>
+          <label>Theme<select value={assetCategory} onChange={(event) => setAssetCategory(event.target.value as Category)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <button className="button button-quiet search-symbol" type="button" onClick={() => void searchMarket(new Event('submit') as unknown as FormEvent<HTMLFormElement>)}><Search size={15} /> Search API</button>
+          {searchResults.length > 0 && <div className="search-results">{searchResults.slice(0, 8).map((result) => <button key={result.symbol} type="button" onClick={() => selectSearchResult(result)}><strong>{result.symbol}</strong><span>{result.company_name}</span></button>)}</div>}
+          {searchError && <p className="form-error">{searchError}</p>}
+          <button className="button button-primary" type="submit"><Plus size={16} /> Add to monitoring</button>
         </form>}
 
         <section className="stat-row">
-          <div className="stat-cell"><span>ON YOUR BOARD</span><strong>{String(assets.length).padStart(2, '0')}</strong><small>tracked symbols</small></div>
-          <div className="stat-cell"><span>PRICE HISTORIES</span><strong>{String(assets.filter((asset) => asset.prices.length).length).padStart(2, '0')}</strong><small>with imported or sample series</small></div>
-          <div className="stat-cell"><span>HISTORICAL 2X RATE</span><strong>{boardRate === null ? '--' : `${Math.round(boardRate * 100)}%`}</strong><small>average across measurable names</small></div>
-          <div className="stat-cell"><span>LAST OBSERVATION</span><strong className="stat-date">{selected?.prices.length ? dateLabel(selected.prices[selected.prices.length - 1].date) : '--'}</strong><small>latest selected price date</small></div>
+          <div className="stat-cell"><span>MONITORED SYMBOLS</span><strong>{String(assets.length).padStart(2, '0')}</strong><small>persisted on this computer</small></div>
+          <div className="stat-cell"><span>CAPTURED TODAY</span><strong>{String(todaySnapshots).padStart(2, '0')}</strong><small>India market date</small></div>
+          <div className="stat-cell"><span>ACTIVE 2× MONITORS</span><strong>{String(assets.filter((asset) => asset.prediction?.outcome === 'monitoring').length).padStart(2, '0')}</strong><small>63 captured-session horizon</small></div>
+          <div className="stat-cell"><span>2× TARGET REACHED</span><strong>{String(targetHits).padStart(2, '0')}</strong><small>observed outcomes</small></div>
         </section>
 
         <section className="board-layout">
           <div className="watchlist-panel">
-            <div className="section-heading"><div><span className="eyebrow">UNIVERSE</span><h2>Watchlist <span className="count-pill">{visible.length}</span></h2></div><div className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find ticker" aria-label="Find ticker" /></div></div>
+            <div className="section-heading"><div><span className="eyebrow">UNIVERSE</span><h2>Monitored list <span className="count-pill">{visible.length}</span></h2></div><div className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find ticker" aria-label="Find ticker" /></div></div>
             <div className="category-tabs" role="tablist" aria-label="Filter by theme">{filters.map((item) => <button key={item} className={filter === item ? 'category-tab active' : 'category-tab'} onClick={() => setFilter(item)} role="tab" aria-selected={filter === item}>{item}</button>)}</div>
-            <div className="table-scroll"><table className="watchlist-table"><thead><tr><th>Company / ticker</th><th>Theme</th><th>Last close</th><th>Historical 2x rate</th><th /></tr></thead><tbody>
+            <div className="table-scroll"><table className="watchlist-table"><thead><tr><th>Company / ticker</th><th>Last quote</th><th>3-month 2× target</th><th>Progress</th><th /></tr></thead><tbody>
               {visible.map((asset) => {
-                const itemRate = estimateDoubleRate(asset.prices)
+                const price = asset.prices[asset.prices.length - 1]
+                const targetPlan = asset.prediction
+                const progressValue = price && targetPlan ? (price.close / targetPlan.baselinePrice) * 100 : undefined
+                const rate = estimateDoubleRate(asset.prices)
                 return <tr key={asset.ticker} className={selected?.ticker === asset.ticker ? 'selected-row' : ''} onClick={() => setSelectedTicker(asset.ticker)}>
-                  <td><div className="equity-cell"><span className={`ticker-mark ${asset.category.toLowerCase().replace(/\s/g, '-')}`}>{asset.ticker.slice(0, 2)}</span><div><strong>{asset.ticker}</strong><span>{asset.name}{asset.source === 'demo' && <em className="demo-chip">DEMO</em>}</span></div></div></td>
-                  <td><span className="theme-label">{asset.category}</span></td><td className="price-cell">{money(latestPrice(asset.prices)?.close, asset.currency)}</td>
-                  <td><div className="rate-cell"><strong>{itemRate.probability === null ? '--' : `${Math.round(itemRate.probability * 100)}%`}</strong><span>{itemRate.windows ? `${itemRate.windows} rolling windows` : 'Need 127+ closes'}</span></div></td><td><button className="row-select" title={`View ${asset.ticker}`}><span /></button></td>
+                  <td><div className="equity-cell"><span className={`ticker-mark ${asset.category.toLowerCase().replace(/\s/g, '-')}`}>{asset.ticker.slice(0, 2)}</span><div><strong>{asset.ticker}</strong><span>{asset.name}</span></div></div></td>
+                  <td><div className="quote-cell"><strong>{money(price?.close)}</strong><span>{price ? dateLabel(price.date) : 'Awaiting first quote'}</span></div></td>
+                  <td><div className="rate-cell"><strong>{money(targetPlan?.targetPrice)}</strong><span>{targetPlan ? `${dateLabel(targetPlan.baselineDate)} baseline` : 'Set on first quote'}</span></div></td>
+                  <td><div className="rate-cell"><strong>{progressValue === undefined ? '--' : `${(progressValue - 100).toFixed(1)}%`}</strong><span>{targetPlan?.outcome === 'hit' ? 'Target reached' : targetPlan?.outcome === 'not_reached' ? 'Horizon ended' : `${asset.prices.length} snapshots${rate.windows ? ` · ${Math.round((rate.probability || 0) * 100)}% historical` : ''}`}</span></div></td>
+                  <td><button className="icon-button remove-button light-remove" title={`Remove ${asset.ticker}`} onClick={(event) => { event.stopPropagation(); void removeAsset(asset.ticker) }}><Trash2 size={15} /></button></td>
                 </tr>
               })}
-              {!visible.length && <tr><td className="empty-cell" colSpan={5}>No equities match this filter. Add an equity or load the sample board.</td></tr>}
+              {!visible.length && <tr><td className="empty-cell" colSpan={5}>{loading ? 'Loading the persisted watchlist…' : 'No symbols monitored yet. Add an NSE/BSE ticker to start capturing daily quotes.'}</td></tr>}
             </tbody></table></div>
-            <div className="table-footnote"><CircleHelp size={14} /> 2x rate is a historical frequency, not an outlook. Windows overlap and are not independent trials.</div>
+            <div className="table-footnote"><CircleHelp size={14} /> Historical hit rate appears only after enough real daily snapshots; it is not a forecast.</div>
           </div>
 
           <aside className="focus-panel">{selected ? <>
-            <div className="focus-topline"><span className="eyebrow">SELECTED NAME</span><button className="icon-button remove-button" title={`Remove ${selected.ticker}`} onClick={() => removeAsset(selected.ticker)}><Trash2 size={15} /></button></div>
+            <div className="focus-topline"><span className="eyebrow">SELECTED MONITOR</span><span className="monitor-state">{selected.prediction?.outcome === 'hit' ? 'TARGET HIT' : selected.prediction ? 'TRACKING' : 'WAITING FOR QUOTE'}</span></div>
             <div className="focus-identity"><span className={`ticker-mark large ${selected.category.toLowerCase().replace(/\s/g, '-')}`}>{selected.ticker.slice(0, 2)}</span><div><h2>{selected.ticker}</h2><p>{selected.name}</p></div></div>
-            <div className="focus-tags"><span>{selected.category}</span><span>{selected.source === 'demo' ? 'SYNTHETIC' : 'CSV HISTORY'}</span></div>
-            <div className="rate-hero"><div><span>HISTORICAL 2X FREQUENCY</span><strong>{rate.probability === null ? '--' : `${Math.round(rate.probability * 100)}%`}</strong></div><span className="rate-sample">{rate.windows ? `${rate.hits} of ${rate.windows} rolling windows touched 2x` : 'Import at least 127 daily closes'}</span></div>
-            <div className="focus-metrics"><div><span>LAST CLOSE</span><strong>{money(last, selected.currency)}</strong></div><div><span>TRACKING TARGET</span><strong>{money(target, selected.currency)}</strong></div><div><span>MOVE FROM START</span><strong className={progress !== undefined && progress >= 100 ? 'positive' : ''}>{progress === undefined ? '--' : `${(progress - 100).toFixed(1)}%`}</strong></div></div>
-            <div className="focus-actions"><button className="button button-outline" onClick={() => updateCsv.current?.click()}><FileUp size={15} /> Import prices</button><input ref={updateCsv} className="hidden-input" type="file" accept=".csv,text/csv" onChange={importPrices} aria-label="Import selected equity price history CSV" /><button className="button button-outline" onClick={() => setShowEvidenceForm((value) => !value)}><Plus size={15} /> Add evidence</button></div>
-          </> : <div className="empty-focus"><div className="empty-symbol">+ <span>2x</span></div><h2>Build your universe</h2><p>Add a symbol and import daily price history to calculate its historical base rate.</p><button className="button button-primary" onClick={() => setShowAdd(true)}><Plus size={16} /> Add first equity</button></div>}</aside>
+            <div className="focus-tags"><span>{selected.category}</span><span>{selected.ticker.endsWith('.BO') ? 'BSE' : 'NSE'}</span></div>
+            <div className="rate-hero"><div><span>LIVE QUOTE</span><strong>{money(last?.close)}</strong></div><span className="rate-sample">{last ? `As of ${timeLabel(last.capturedAt)}` : 'No real quote captured yet'}</span></div>
+            <div className="focus-metrics"><div><span>BASELINE</span><strong>{money(plan?.baselinePrice)}</strong></div><div><span>2× TARGET</span><strong>{money(target)}</strong></div><div><span>OBSERVED MOVE</span><strong className={progress !== undefined && progress >= 200 ? 'positive' : ''}>{progress === undefined ? '--' : `${(progress - 100).toFixed(1)}%`}</strong></div></div>
+            <div className="focus-actions"><button className="button button-outline" onClick={refreshQuotes} disabled={busy}><RefreshCw size={14} className={busy ? 'spin' : ''} /> Capture quote</button><button className="button button-outline" onClick={() => setShowEvidence((value) => !value)}><Plus size={15} /> Add evidence</button></div>
+            {plan && <p className="plan-note">2× target is a tracking threshold set from the first quote, not an AI prediction. Horizon: 63 daily sessions.</p>}
+          </> : <div className="empty-focus"><div className="empty-symbol">+ <span>2×</span></div><h2>Start a monitor</h2><p>Add an NSE/BSE ticker. Its first successful quote will be stored as the baseline.</p><button className="button button-primary" onClick={() => setShowAdd(true)}><Plus size={16} /> Add a symbol</button></div>}</aside>
         </section>
 
         {selected && <section className="lower-grid">
-          <div className="monitor-panel"><div className="section-heading monitor-heading"><div><span className="eyebrow">FORWARD MONITOR / TRACKING FROM {selected.trackingStartDate ? dateLabel(selected.trackingStartDate).toUpperCase() : 'NO BASELINE'}</span><h2>Progress to 2x <span className="live-dot" /></h2></div><div className="monitor-summary"><strong>{progress === undefined ? '--' : `${progress.toFixed(1)}%`}</strong><span>of target price</span></div></div>
-            {tracking.length > 1 ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><LineChart data={tracking} margin={{ top: 14, right: 12, bottom: 4, left: 0 }}>
-              <CartesianGrid vertical={false} stroke="#e9ece9" strokeDasharray="3 4" /><XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: '#858a83', fontSize: 11 }} minTickGap={32} /><YAxis tickLine={false} axisLine={false} tick={{ fill: '#858a83', fontSize: 11 }} width={58} tickFormatter={(value: number) => money(value, selected.currency)} domain={['auto', 'auto']} />
-              <Tooltip formatter={(value) => money(Number(value), selected.currency)} contentStyle={{ border: '1px solid #e0e4dd', borderRadius: 4, fontSize: 12 }} />{target && <ReferenceLine y={target} stroke="#d76c48" strokeDasharray="5 5" label={{ value: '2X TARGET', fill: '#b95a3b', fontSize: 10, position: 'insideTopRight' }} />}
-              <Line type="monotone" dataKey="close" name="Close" stroke="#087e72" strokeWidth={2.5} dot={false} activeDot={{ r: 4, fill: '#087e72', stroke: '#fff', strokeWidth: 2 }} />
-            </LineChart></ResponsiveContainer></div> : <div className="chart-empty"><Activity size={22} /><span>Import more than one price observation after setting a tracking baseline to see progress here.</span></div>}
-            <div className="chart-legend"><span><i className="legend-price" /> Closing price</span><span><i className="legend-target" /> 2x of tracking-start close</span><small>Historical closes and subsequent CSV updates</small></div>
+          <div className="monitor-panel"><div className="section-heading monitor-heading"><div><span className="eyebrow">DAILY QUOTE SNAPSHOTS / {tracking.length} POINTS</span><h2>Three-month outcome <span className="live-dot" /></h2></div><div className="monitor-summary"><strong>{progress === undefined ? '--' : `${progress.toFixed(1)}%`}</strong><span>of baseline price</span></div></div>
+            {tracking.length > 1 ? <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><LineChart data={tracking.map((point) => ({ ...point, label: dateLabel(point.date) }))} margin={{ top: 14, right: 12, bottom: 4, left: 0 }}>
+              <CartesianGrid vertical={false} stroke="#e9ece9" strokeDasharray="3 4" /><XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: '#858a83', fontSize: 11 }} minTickGap={32} /><YAxis tickLine={false} axisLine={false} tick={{ fill: '#858a83', fontSize: 11 }} width={68} tickFormatter={(value: number) => money(value)} domain={['auto', 'auto']} />
+              <Tooltip formatter={(value) => money(Number(value))} contentStyle={{ border: '1px solid #e0e4dd', borderRadius: 4, fontSize: 12 }} />{target && <ReferenceLine y={target} stroke="#d76c48" strokeDasharray="5 5" label={{ value: '2× TARGET', fill: '#b95a3b', fontSize: 10, position: 'insideTopRight' }} />}
+              <Line type="monotone" dataKey="close" name="Market quote" stroke="#087e72" strokeWidth={2.5} dot={false} activeDot={{ r: 4, fill: '#087e72', stroke: '#fff', strokeWidth: 2 }} />
+            </LineChart></ResponsiveContainer></div> : <div className="chart-empty"><Activity size={22} /><span>{tracking.length ? 'A second daily snapshot is needed to draw the outcome chart.' : 'No real quote snapshots yet. When the feed is available, capture a baseline to begin.'}</span></div>}
+            <div className="chart-legend"><span><i className="legend-price" /> Stored provider quote</span><span><i className="legend-target" /> 2× baseline</span><small>One point per India market date · {health.provider}</small></div>
           </div>
 
-          <div className="evidence-panel"><div className="section-heading evidence-heading"><div><span className="eyebrow">SOURCE LOG / {evidence.length} ENTRIES</span><h2>Evidence trail</h2></div><button className="icon-button" title="Add evidence" onClick={() => setShowEvidenceForm((value) => !value)}><Plus size={18} /></button></div>
-            {showEvidenceForm && <form className="evidence-form" onSubmit={addEvidence}><label>Observation<textarea required value={evidenceSummary} onChange={(event) => setEvidenceSummary(event.target.value)} placeholder="What did the source report? Separate fact from interpretation." rows={3} /></label><div className="evidence-form-row"><label>Source<input required value={evidenceSource} onChange={(event) => setEvidenceSource(event.target.value)} placeholder="Company filing, regulator, ..." /></label><label>Signal<select value={stance} onChange={(event) => setStance(event.target.value as Stance)}><option>Supports</option><option>Mixed</option><option>Contradicts</option></select></label></div><label>Source URL<input type="url" value={evidenceUrl} onChange={(event) => setEvidenceUrl(event.target.value)} placeholder="https://" /></label><button className="button button-primary" type="submit"><Check size={15} /> Save source note</button></form>}
-            {evidence.length ? <div className="evidence-list">{evidence.map((item) => <EvidenceRow key={item.id} item={item} onRemove={() => updateAsset(selected.ticker, (asset) => ({ ...asset, evidence: asset.evidence.filter((entry) => entry.id !== item.id) }))} />)}</div> : <div className="evidence-empty"><div className="evidence-empty-icon"><ShieldCheck size={18} /></div><strong>No evidence logged yet</strong><p>Capture dated claims from filings, company releases or regulators. Keep the original source attached.</p><button className="text-button" onClick={() => setShowEvidenceForm(true)}>Log first source <ArrowUpRight size={14} /></button></div>}
+          <div className="evidence-panel"><div className="section-heading evidence-heading"><div><span className="eyebrow">SOURCE LOG / {selected.evidence.length} ENTRIES</span><h2>Evidence trail</h2></div><button className="icon-button" title="Add evidence" onClick={() => setShowEvidence((value) => !value)}><Plus size={18} /></button></div>
+            {showEvidence && <form className="evidence-form" onSubmit={saveEvidence}><label>Observation<textarea required value={evidenceSummary} onChange={(event) => setEvidenceSummary(event.target.value)} placeholder="What did the source report? Separate fact from interpretation." rows={3} /></label><div className="evidence-form-row"><label>Source<input required value={evidenceSource} onChange={(event) => setEvidenceSource(event.target.value)} placeholder="Exchange filing, company release…" /></label><label>Signal<select value={stance} onChange={(event) => setStance(event.target.value as Stance)}><option>Supports</option><option>Mixed</option><option>Contradicts</option></select></label></div><label>Source URL<input type="url" value={evidenceUrl} onChange={(event) => setEvidenceUrl(event.target.value)} placeholder="https://" /></label><button className="button button-primary" type="submit"><Check size={15} /> Save source note</button></form>}
+            {selected.evidence.length ? <div className="evidence-list">{selected.evidence.map((item) => <EvidenceRow key={item.id} item={item} onRemove={() => void removeEvidence(item.id)} />)}</div> : <div className="evidence-empty"><div className="evidence-empty-icon"><ShieldCheck size={18} /></div><strong>No evidence logged yet</strong><p>Evidence notes are manual and saved with this local monitor. Add exchange filings or company announcements with links.</p><button className="text-button" onClick={() => setShowEvidence(true)}>Log first source <ArrowUpRight size={14} /></button></div>}
           </div>
         </section>}
 
-        <footer className="page-footer"><span><ShieldCheck size={14} /> Research workspace only. Not investment advice.</span><span>{assets.length} names / {assets.filter((asset) => asset.prices.length).length} price series</span></footer>
+        <footer className="page-footer"><span><ShieldCheck size={14} /> Monitoring tool only · no 2× prediction is being made</span><span>{assets.length} symbols / {assets.reduce((sum, asset) => sum + asset.prices.length, 0)} daily snapshots</span></footer>
       </main>
     </div>
   )

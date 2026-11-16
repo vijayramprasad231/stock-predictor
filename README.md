@@ -1,6 +1,6 @@
 # Signal Desk
 
-An evidence-first research dashboard for tracking NSE/BSE-listed equities across metals, AI and semiconductors.
+Personal NSE equity monitoring for semiconductor/electronics companies and suppliers to AI compute, data centers and power infrastructure. General IT-services companies are excluded. The initial watchlist contains candidate names to research, not stock recommendations. It contains no fabricated prices.
 
 ## Run locally
 
@@ -9,18 +9,22 @@ npm install
 npm run dev
 ```
 
-## Add price history
+This starts the web UI and local Node API together. Keep the process running for scheduled quote capture. The dashboard also has a manual refresh action.
 
-Add an Indian-listed equity using its Yahoo Finance symbol (`.NS` for NSE or `.BO` for BSE) and upload a CSV with `Date` and `Close` or `Adj Close` columns. Dates should be daily trading dates and prices should be positive numbers in the selected currency (INR by default). The app stores imported quotes and evidence notes in this browser's local storage; it does not fetch live market data or send the data to a service.
+## Data source and limitations
 
-Import adjusted closing prices when available so splits and distributions are treated consistently. Use data you have the right to access and export.
+Quotes come from the public `0xramm/Indian-Stock-Market-API`, which proxies Yahoo Finance. It needs no API key, but it is unofficial, can be unavailable or rate-limited, and has no uptime guarantee. Yahoo may change or restrict its endpoints. This is a personal monitoring tool, not an exchange-authorized feed. Verify important prices independently.
 
-## Historical 2x frequency
+Symbols may use `.NS` for NSE or `.BO` for BSE. Search uses the upstream API; when it is unavailable, enter a known ticker manually. Daily quote snapshots and watchlist/evidence data are stored locally in `server/data/monitor.json`, which is git-ignored.
 
-For each rolling 126-trading-session window, the app checks whether any subsequent close reached at least twice the first close. It displays the number of windows that reached that level divided by the number checked. Windows overlap, historical regimes change, and this frequency is not a forecast or investment recommendation. Less than 127 closes is shown as insufficient history.
+## Snapshot schedule
 
-## Evidence log
+While the API process is running, it attempts one quote capture on weekdays after 15:45 India time. If the computer or process is off, that date will be missed; use the dashboard's Refresh quotes action to request a capture. The provider may return its latest available quote rather than a confirmed official close. Failed requests stay visibly unavailable; no synthetic prices are inserted.
 
-Add dated notes with a source label, optional URL, and whether the item supports, contradicts, or is mixed evidence for the thesis. Keep observed facts distinct from interpretation. Notes are saved locally in the browser.
+## Three-month monitor
 
-The initial board is fabricated demo data and is labeled as such. Replace it with actual price history before relying on any displayed values.
+The first successful quote for a symbol records the baseline and a 2x target. The app stores one point per provider-reported India market date and reports whether the target was reached within 63 captured sessions (approximately three months). Missing market days, holidays, provider failures and missed scheduled runs reduce the observation count. The target is a tracking threshold, not a model forecast or recommendation. There is no predicted probability until a separately validated model and suitable historical data exist.
+
+## Evidence trail
+
+Evidence notes are manual: record the observation, source, optional URL, and whether it supports, contradicts, or is mixed. They are stored in the same local monitor file as the quotes. Back up that file privately if you need to preserve the monitoring history; never commit it or put personal data in this public repository.
